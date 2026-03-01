@@ -17,6 +17,8 @@ type Config struct {
 	RedisPassword   string
 	RedisDB         int
 	JWTSecret       string
+	AccessTokenTTL  int
+	RefreshTokenTTL int
 	WSAllowedOrigin string
 }
 
@@ -34,6 +36,8 @@ func Load() Config {
 		RedisPassword:   getEnv("REDIS_PASSWORD", ""),
 		RedisDB:         getEnvAsInt("REDIS_DB", 0),
 		JWTSecret:       getEnv("JWT_SECRET", "change-me"),
+		AccessTokenTTL:  getEnvAsInt("ACCESS_TOKEN_TTL_MINUTES", 15),
+		RefreshTokenTTL: getEnvAsInt("REFRESH_TOKEN_TTL_HOURS", 720),
 		WSAllowedOrigin: getEnv("WS_ALLOWED_ORIGIN", "*"),
 	}
 }
