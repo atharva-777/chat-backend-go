@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"log"
+	"time"
 
+	"github.com/atharva-777/chat-backend-go/internal/auth"
 	"github.com/atharva-777/chat-backend-go/internal/config"
 	"github.com/atharva-777/chat-backend-go/internal/store/postgres"
 	redistore "github.com/atharva-777/chat-backend-go/internal/store/redis"
@@ -38,6 +40,16 @@ func main() {
 		log.Fatalf("server: redis setup failed: %v", err)
 	}
 
+	authService, err := auth.NewService(
+		pgPool,
+		cfg.JWTSecret,
+		time.Duration(cfg.AccessTokenTTL)*time.Minute,
+		time.Duration(cfg.RefreshTokenTTL)*time.Hour,
+	)
+	if err != nil {
+		log.Fatalf("server: auth setup failed: %v", err)
+	}
+
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
 
@@ -48,12 +60,15 @@ func main() {
 	}
 	healthHandler.RegisterRoutes(router)
 
+	authHandler := httproutes.NewAuthHandler(authService)
+	authHandler.RegisterRoutes(router, auth.Middleware(authService))
+
 	hub := ws.NewHub()
 	hubCtx, cancelHub := context.WithCancel(rootCtx)
 	defer cancelHub()
 	go hub.Run(hubCtx)
 
-	wsHandler := ws.NewHandler(hub, cfg.WSAllowedOrigin)
+	wsHandler := ws.NewHandler(hub, authService, pgPool, cfg.WSAllowedOrigin)
 	router.GET("/ws", wsHandler.Handle)
 
 	addr := ":" + cfg.HTTPPort
