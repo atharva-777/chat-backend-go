@@ -1,16 +1,17 @@
-# Golang Chat Backend (Gin + WebSocket)
+# Chat Backend (Go + Gin + WebSocket)
 
-Backend foundation for an iOS chat app using:
-- Gin (HTTP API)
-- Gorilla WebSocket (real-time events)
-- PostgreSQL (persistence)
-- Redis (realtime/presence/cache foundation)
+Backend for an iOS chat app with:
+- JWT auth (access + refresh rotation)
+- 1:1 and group chats
+- chat list and message history APIs
+- WebSocket realtime messaging/typing/read receipts
+- PostgreSQL persistence + Redis connectivity baseline
 
 ## Prerequisites
 
 - Go 1.25+
 - Docker Desktop
-- `migrate` CLI with postgres driver:
+- `migrate` CLI (postgres build):
 
 ```powershell
 go install -tags "postgres" github.com/golang-migrate/migrate/v4/cmd/migrate@latest
@@ -24,21 +25,19 @@ go install -tags "postgres" github.com/golang-migrate/migrate/v4/cmd/migrate@lat
 docker compose up -d
 ```
 
-2. Apply migrations:
+2. Run migrations:
 
 ```powershell
 migrate -source "file://migrations" -database "postgres://postgres:postgres@localhost:5432/chat_app?sslmode=disable" up
 ```
 
-3. Start server:
+3. Run server:
 
 ```powershell
 go run ./cmd/server
 ```
 
-Server starts on `http://localhost:8080` by default.
-
-## Environment Variables
+## Environment
 
 ```env
 APP_ENV=development
@@ -53,71 +52,100 @@ REFRESH_TOKEN_TTL_HOURS=720
 WS_ALLOWED_ORIGIN=*
 ```
 
-## HTTP Endpoints
+## API Surface
 
+### Health
 - `GET /health`
-  - Checks API, Postgres, and Redis.
 
+### Auth
 - `POST /auth/register`
 - `POST /auth/login`
 - `POST /auth/refresh`
 - `POST /auth/logout`
-- `GET /auth/me` (requires `Authorization: Bearer <access_token>`)
+- `GET /auth/me` (Bearer access token)
 
-## Auth Payload Examples
+### Chats (Bearer access token)
+- `GET /chats?limit=20&offset=0`
+- `GET /chats/:chat_id`
+- `POST /chats/direct`
+- `POST /chats/group`
+- `GET /chats/:chat_id/messages?limit=30&before=2026-03-03T10:00:00Z`
+- `POST /chats/:chat_id/messages`
+- `POST /chats/:chat_id/read`
+- `GET /users/search?query=ath&limit=20`
 
-`POST /auth/register`
+## Request Examples
+
+### Create direct chat
 
 ```json
 {
-  "email": "user@example.com",
-  "username": "atharva",
-  "password": "strongPassword123",
-  "display_name": "Atharva"
+  "peer_user_id": "<user_uuid>"
 }
 ```
 
-`POST /auth/login`
+### Create group chat
 
 ```json
 {
-  "email": "user@example.com",
-  "password": "strongPassword123"
+  "title": "Weekend Plan",
+  "member_user_ids": ["<user_uuid_1>", "<user_uuid_2>"]
 }
 ```
 
-`POST /auth/refresh`
+### Send message (REST fallback)
 
 ```json
 {
-  "refresh_token": "<refresh_token>"
+  "client_msg_id": "11111111-1111-1111-1111-111111111111",
+  "content": "Hello"
+}
+```
+
+### Mark read
+
+```json
+{
+  "message_id": "<message_uuid>"
 }
 ```
 
 ## WebSocket
 
-- Endpoint: `GET /ws?access_token=<access_token>`
-- Alternative: send `Authorization: Bearer <access_token>` in handshake headers.
-- Authorization: for `message.send` and `typing.*`, sender must exist in `chat_members` for that `chat_id`.
-- Broadcast scope: events are sent only to connected users who are members of that chat.
+Endpoint:
+- `GET /ws?access_token=<access_token>`
+- or `Authorization: Bearer <access_token>` in handshake
 
-## WebSocket Event Contract (Current)
-
-Client -> Server:
+### Client -> Server events
 
 ```json
 {"type":"ping"}
-{"type":"message.send","chat_id":"<chat_uuid>","client_msg_id":"msg-1","content":"hello"}
+{"type":"message.send","chat_id":"<chat_uuid>","client_msg_id":"11111111-1111-1111-1111-111111111111","content":"hello"}
+{"type":"message.read","chat_id":"<chat_uuid>","message_id":"<message_uuid>"}
 {"type":"typing.start","chat_id":"<chat_uuid>"}
 {"type":"typing.stop","chat_id":"<chat_uuid>"}
 ```
 
-Server -> Clients:
+### Server -> Client events
 
 ```json
-{"type":"pong","sent_at":"2026-03-01T12:00:00Z"}
-{"type":"message.new","chat_id":"<chat_uuid>","sender_id":"<user_uuid>","client_msg_id":"msg-1","content":"hello","sent_at":"2026-03-01T12:00:00Z"}
-{"type":"typing.start","chat_id":"<chat_uuid>","sender_id":"<user_uuid>","sent_at":"2026-03-01T12:00:00Z"}
-{"type":"typing.stop","chat_id":"<chat_uuid>","sender_id":"<user_uuid>","sent_at":"2026-03-01T12:00:00Z"}
-{"type":"error","error":"forbidden_chat","sent_at":"2026-03-01T12:00:00Z"}
+{"type":"pong","sent_at":"2026-03-03T12:00:00Z"}
+{"type":"message.ack","chat_id":"<chat_uuid>","message_id":"<message_uuid>","client_msg_id":"11111111-1111-1111-1111-111111111111","sent_at":"2026-03-03T12:00:00Z"}
+{"type":"message.new","chat_id":"<chat_uuid>","message_id":"<message_uuid>","sender_id":"<user_uuid>","client_msg_id":"11111111-1111-1111-1111-111111111111","content":"hello","sent_at":"2026-03-03T12:00:00Z"}
+{"type":"message.read","chat_id":"<chat_uuid>","message_id":"<message_uuid>","user_id":"<user_uuid>","sent_at":"2026-03-03T12:00:00Z"}
+{"type":"typing.start","chat_id":"<chat_uuid>","user_id":"<user_uuid>","sent_at":"2026-03-03T12:00:00Z"}
+{"type":"typing.stop","chat_id":"<chat_uuid>","user_id":"<user_uuid>","sent_at":"2026-03-03T12:00:00Z"}
+{"type":"error","error":"forbidden_chat","sent_at":"2026-03-03T12:00:00Z"}
 ```
+
+## iOS Flow
+
+1. Login/Register -> store access + refresh tokens securely.
+2. `GET /chats` -> show all direct/group conversations.
+3. Open chat -> `GET /chats/:chat_id/messages` for initial history.
+4. Open WS with access token.
+5. Send `message.send` with `client_msg_id`.
+6. Use `message.ack` + `message.new` to update UI.
+7. Send `message.read` when user reads latest message.
+8. On token expiry, call `/auth/refresh` and reconnect WS.
+
