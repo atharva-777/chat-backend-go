@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/atharva-777/chat-backend-go/internal/auth"
+	"github.com/atharva-777/chat-backend-go/internal/chat"
 	"github.com/atharva-777/chat-backend-go/internal/config"
 	"github.com/atharva-777/chat-backend-go/internal/store/postgres"
 	redistore "github.com/atharva-777/chat-backend-go/internal/store/redis"
@@ -50,6 +51,11 @@ func main() {
 		log.Fatalf("server: auth setup failed: %v", err)
 	}
 
+	chatService, err := chat.NewService(pgPool)
+	if err != nil {
+		log.Fatalf("server: chat setup failed: %v", err)
+	}
+
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
 
@@ -60,15 +66,19 @@ func main() {
 	}
 	healthHandler.RegisterRoutes(router)
 
+	authMiddleware := auth.Middleware(authService)
 	authHandler := httproutes.NewAuthHandler(authService)
-	authHandler.RegisterRoutes(router, auth.Middleware(authService))
+	authHandler.RegisterRoutes(router, authMiddleware)
+
+	chatHandler := httproutes.NewChatHandler(chatService)
+	chatHandler.RegisterRoutes(router, authMiddleware)
 
 	hub := ws.NewHub()
 	hubCtx, cancelHub := context.WithCancel(rootCtx)
 	defer cancelHub()
 	go hub.Run(hubCtx)
 
-	wsHandler := ws.NewHandler(hub, authService, pgPool, cfg.WSAllowedOrigin)
+	wsHandler := ws.NewHandler(hub, authService, chatService, cfg.WSAllowedOrigin)
 	router.GET("/ws", wsHandler.Handle)
 
 	addr := ":" + cfg.HTTPPort

@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/atharva-777/chat-backend-go/internal/auth"
+	"github.com/atharva-777/chat-backend-go/internal/chat"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -26,7 +26,7 @@ const (
 type Handler struct {
 	hub         *Hub
 	authService *auth.Service
-	pgPool      *pgxpool.Pool
+	chatService *chat.Service
 	upgrader    websocket.Upgrader
 }
 
@@ -42,18 +42,20 @@ type Client struct {
 type Event struct {
 	Type        string    `json:"type"`
 	ChatID      string    `json:"chat_id,omitempty"`
+	MessageID   string    `json:"message_id,omitempty"`
 	SenderID    string    `json:"sender_id,omitempty"`
+	UserID      string    `json:"user_id,omitempty"`
 	ClientMsgID string    `json:"client_msg_id,omitempty"`
 	Content     string    `json:"content,omitempty"`
 	Error       string    `json:"error,omitempty"`
 	SentAt      time.Time `json:"sent_at,omitempty"`
 }
 
-func NewHandler(hub *Hub, authService *auth.Service, pgPool *pgxpool.Pool, allowedOrigin string) *Handler {
+func NewHandler(hub *Hub, authService *auth.Service, chatService *chat.Service, allowedOrigin string) *Handler {
 	return &Handler{
 		hub:         hub,
 		authService: authService,
-		pgPool:      pgPool,
+		chatService: chatService,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -155,97 +157,128 @@ func (c *Client) readPump() {
 }
 
 func (c *Client) handleIncoming(in Event) {
+	in.Type = strings.TrimSpace(in.Type)
 	switch in.Type {
 	case "ping":
 		c.queueEvent(Event{Type: "pong", SentAt: time.Now().UTC()})
 	case "message.send":
-		recipients, ok := c.authorizeRecipients(in.ChatID)
-		if !ok {
-			return
-		}
-		out := Event{
-			Type:        "message.new",
-			ChatID:      in.ChatID,
-			SenderID:    c.userID,
-			ClientMsgID: in.ClientMsgID,
-			Content:     in.Content,
-			SentAt:      time.Now().UTC(),
-		}
-		c.broadcastEvent(out, recipients)
+		c.handleMessageSend(in)
+	case "message.read":
+		c.handleMessageRead(in)
 	case "typing.start", "typing.stop":
-		recipients, ok := c.authorizeRecipients(in.ChatID)
-		if !ok {
-			return
-		}
-		out := Event{
-			Type:     in.Type,
-			ChatID:   in.ChatID,
-			SenderID: c.userID,
-			SentAt:   time.Now().UTC(),
-		}
-		c.broadcastEvent(out, recipients)
+		c.handleTyping(in)
 	default:
 		c.queueEvent(Event{Type: "error", Error: "unsupported_event_type", SentAt: time.Now().UTC()})
 	}
 }
 
-func (c *Client) authorizeRecipients(chatID string) (map[string]struct{}, bool) {
-	chatID = strings.TrimSpace(chatID)
-	if chatID == "" {
-		c.queueEvent(Event{Type: "error", Error: "missing_chat_id", SentAt: time.Now().UTC()})
-		return nil, false
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+func (c *Client) handleMessageSend(in Event) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	recipients, err := c.handler.loadChatRecipients(ctx, chatID)
+	msg, recipients, err := c.handler.chatService.SendMessage(ctx, c.userID, chat.SendMessageInput{
+		ChatID:      in.ChatID,
+		ClientMsgID: in.ClientMsgID,
+		Content:     in.Content,
+	})
 	if err != nil {
-		if strings.Contains(err.Error(), "invalid input syntax for type uuid") {
-			c.queueEvent(Event{Type: "error", Error: "invalid_chat_id", SentAt: time.Now().UTC()})
-			return nil, false
-		}
-		c.queueEvent(Event{Type: "error", Error: "authorization_check_failed", SentAt: time.Now().UTC()})
-		return nil, false
+		c.queueEvent(Event{Type: "error", Error: mapChatError(err), SentAt: time.Now().UTC()})
+		return
 	}
 
-	if _, ok := recipients[c.userID]; !ok {
-		c.queueEvent(Event{Type: "error", Error: "forbidden_chat", SentAt: time.Now().UTC()})
-		return nil, false
+	clientMsgID := ""
+	if msg.ClientMsgID != nil {
+		clientMsgID = *msg.ClientMsgID
 	}
 
-	return recipients, true
+	c.queueEvent(Event{
+		Type:        "message.ack",
+		ChatID:      msg.ChatID,
+		MessageID:   msg.ID,
+		ClientMsgID: clientMsgID,
+		SentAt:      msg.SentAt,
+	})
+
+	c.broadcastEvent(Event{
+		Type:        "message.new",
+		ChatID:      msg.ChatID,
+		MessageID:   msg.ID,
+		SenderID:    msg.SenderID,
+		ClientMsgID: clientMsgID,
+		Content:     msg.Content,
+		SentAt:      msg.SentAt,
+	}, recipientSet(recipients))
 }
 
-func (h *Handler) loadChatRecipients(ctx context.Context, chatID string) (map[string]struct{}, error) {
-	if h.pgPool == nil {
-		return nil, errors.New("postgres pool is not configured")
-	}
+func (c *Client) handleMessageRead(in Event) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	rows, err := h.pgPool.Query(ctx, `
-		SELECT user_id
-		FROM chat_members
-		WHERE chat_id = $1
-	`, chatID)
+	receipt, recipients, err := c.handler.chatService.MarkRead(ctx, c.userID, chat.MarkReadInput{
+		ChatID:    in.ChatID,
+		MessageID: in.MessageID,
+	})
 	if err != nil {
-		return nil, err
+		c.queueEvent(Event{Type: "error", Error: mapChatError(err), SentAt: time.Now().UTC()})
+		return
 	}
-	defer rows.Close()
 
-	recipients := make(map[string]struct{})
-	for rows.Next() {
-		var userID string
-		if err := rows.Scan(&userID); err != nil {
-			return nil, err
+	c.broadcastEvent(Event{
+		Type:      "message.read",
+		ChatID:    receipt.ChatID,
+		MessageID: receipt.MessageID,
+		UserID:    receipt.UserID,
+		SentAt:    receipt.ReadAt,
+	}, recipientSet(recipients))
+}
+
+func (c *Client) handleTyping(in Event) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	recipients, err := c.handler.chatService.ChatRecipientsForMember(ctx, c.userID, in.ChatID)
+	if err != nil {
+		c.queueEvent(Event{Type: "error", Error: mapChatError(err), SentAt: time.Now().UTC()})
+		return
+	}
+
+	c.broadcastEvent(Event{
+		Type:   in.Type,
+		ChatID: strings.TrimSpace(in.ChatID),
+		UserID: c.userID,
+		SentAt: time.Now().UTC(),
+	}, recipientSet(recipients))
+}
+
+func mapChatError(err error) string {
+	switch {
+	case errors.Is(err, chat.ErrInvalidInput):
+		return "invalid_payload"
+	case errors.Is(err, chat.ErrForbiddenChat):
+		return "forbidden_chat"
+	case errors.Is(err, chat.ErrChatNotFound):
+		return "chat_not_found"
+	case errors.Is(err, chat.ErrMessageNotFound):
+		return "message_not_found"
+	case errors.Is(err, chat.ErrUserNotFound):
+		return "user_not_found"
+	case strings.Contains(strings.ToLower(err.Error()), "invalid input syntax for type uuid"):
+		return "invalid_payload"
+	default:
+		return "server_error"
+	}
+}
+
+func recipientSet(ids []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
 		}
-		recipients[userID] = struct{}{}
+		set[id] = struct{}{}
 	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return recipients, nil
+	return set
 }
 
 func (c *Client) broadcastEvent(event Event, recipients map[string]struct{}) {
