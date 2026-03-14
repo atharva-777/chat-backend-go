@@ -30,9 +30,9 @@ func Load() Config {
 
 	return Config{
 		AppEnv:          getEnv("APP_ENV", "development"),
-		HTTPPort:        getEnv("HTTP_PORT", "8080"),
+		HTTPPort:        getEnvFirst([]string{"HTTP_PORT", "PORT"}, "8080"),
 		PostgresDSN:     getEnv("POSTGRES_DSN", ""),
-		RedisAddr:       getEnv("REDIS_ADDR", "localhost:6379"),
+		RedisAddr:       getEnv("REDIS_ADDR", ""),
 		RedisPassword:   getEnv("REDIS_PASSWORD", ""),
 		RedisDB:         getEnvAsInt("REDIS_DB", 0),
 		JWTSecret:       getEnv("JWT_SECRET", "change-me"),
@@ -40,6 +40,15 @@ func Load() Config {
 		RefreshTokenTTL: getEnvAsInt("REFRESH_TOKEN_TTL_HOURS", 720),
 		WSAllowedOrigin: getEnv("WS_ALLOWED_ORIGIN", "*"),
 	}
+}
+
+func getEnvFirst(keys []string, defaultValue string) string {
+	for _, key := range keys {
+		if value := os.Getenv(key); value != "" {
+			return value
+		}
+	}
+	return defaultValue
 }
 
 func getEnvAsInt(key string, defaultValue int) int {

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/atharva-777/chat-backend-go/internal/auth"
@@ -13,6 +15,7 @@ import (
 	httproutes "github.com/atharva-777/chat-backend-go/internal/transport/http"
 	"github.com/atharva-777/chat-backend-go/internal/transport/ws"
 	"github.com/gin-gonic/gin"
+	goredis "github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -30,15 +33,21 @@ func main() {
 	}
 	defer pgPool.Close()
 
-	redisClient := redistore.NewClient(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
-	defer func() {
-		if err := redisClient.Close(); err != nil {
-			log.Printf("server: redis close failed: %v", err)
-		}
-	}()
+	var redisClient *goredis.Client
+	redisEnabled := strings.TrimSpace(cfg.RedisAddr) != ""
+	if redisEnabled {
+		redisClient = redistore.NewClient(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
+		defer func() {
+			if err := redisClient.Close(); err != nil {
+				log.Printf("server: redis close failed: %v", err)
+			}
+		}()
 
-	if err := redistore.Ping(rootCtx, redisClient); err != nil {
-		log.Fatalf("server: redis setup failed: %v", err)
+		if err := redistore.Ping(rootCtx, redisClient); err != nil {
+			log.Fatalf("server: redis setup failed: %v", err)
+		}
+	} else {
+		log.Printf("server: redis disabled (REDIS_ADDR empty)")
 	}
 
 	authService, err := auth.NewService(
@@ -60,9 +69,10 @@ func main() {
 	router.Use(gin.Logger(), gin.Recovery())
 
 	healthHandler := httproutes.HealthHandler{
-		Env:      cfg.AppEnv,
-		Postgres: pgPool,
-		Redis:    redisClient,
+		Env:           cfg.AppEnv,
+		Postgres:      pgPool,
+		Redis:         redisClient,
+		RedisRequired: redisEnabled,
 	}
 	healthHandler.RegisterRoutes(router)
 
@@ -83,7 +93,17 @@ func main() {
 
 	addr := ":" + cfg.HTTPPort
 	log.Printf("server: starting on %s", addr)
-	if err := router.Run(addr); err != nil {
+
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server: failed to start: %v", err)
 	}
 }
