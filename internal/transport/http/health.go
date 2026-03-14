@@ -11,9 +11,10 @@ import (
 )
 
 type HealthHandler struct {
-	Env      string
-	Postgres *pgxpool.Pool
-	Redis    *goredis.Client
+	Env           string
+	Postgres      *pgxpool.Pool
+	Redis         *goredis.Client
+	RedisRequired bool
 }
 
 type dependencyStatus struct {
@@ -36,16 +37,31 @@ func (h HealthHandler) GetHealth(c *gin.Context) {
 		postgresStatus = dependencyStatus{Status: "down", Error: err.Error()}
 	}
 
-	redisStatus := dependencyStatus{Status: "up"}
-	if h.Redis == nil {
-		redisStatus = dependencyStatus{Status: "down", Error: "redis client is nil"}
-	} else if err := h.Redis.Ping(ctx).Err(); err != nil {
-		redisStatus = dependencyStatus{Status: "down", Error: err.Error()}
+	redisStatus := dependencyStatus{Status: "disabled"}
+	redisHealthy := true
+
+	if h.RedisRequired {
+		redisHealthy = false
+		if h.Redis == nil {
+			redisStatus = dependencyStatus{Status: "down", Error: "redis client is nil"}
+		} else if err := h.Redis.Ping(ctx).Err(); err != nil {
+			redisStatus = dependencyStatus{Status: "down", Error: err.Error()}
+		} else {
+			redisStatus = dependencyStatus{Status: "up"}
+			redisHealthy = true
+		}
+	} else if h.Redis != nil {
+		if err := h.Redis.Ping(ctx).Err(); err != nil {
+			redisStatus = dependencyStatus{Status: "down", Error: err.Error()}
+			redisHealthy = false
+		} else {
+			redisStatus = dependencyStatus{Status: "up"}
+		}
 	}
 
 	overallStatus := "ok"
 	statusCode := http.StatusOK
-	if postgresStatus.Status != "up" || redisStatus.Status != "up" {
+	if postgresStatus.Status != "up" || !redisHealthy {
 		overallStatus = "degraded"
 		statusCode = http.StatusServiceUnavailable
 	}

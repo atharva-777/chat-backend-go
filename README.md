@@ -5,7 +5,7 @@ Backend for an iOS chat app with:
 - 1:1 and group chats
 - chat list and message history APIs
 - WebSocket realtime messaging/typing/read receipts
-- PostgreSQL persistence + Redis connectivity baseline
+- PostgreSQL persistence (Redis optional)
 
 ## Prerequisites
 
@@ -42,14 +42,36 @@ go run ./cmd/server
 ```env
 APP_ENV=development
 HTTP_PORT=8080
+PORT=8080
 POSTGRES_DSN=postgres://postgres:postgres@localhost:5432/chat_app?sslmode=disable
-REDIS_ADDR=localhost:6379
+REDIS_ADDR=
 REDIS_PASSWORD=
 REDIS_DB=0
 JWT_SECRET=change-me
 ACCESS_TOKEN_TTL_MINUTES=15
 REFRESH_TOKEN_TTL_HOURS=720
 WS_ALLOWED_ORIGIN=*
+```
+
+Notes:
+- `PORT` is supported for platforms like Render/Railway. If both `HTTP_PORT` and `PORT` are set, `HTTP_PORT` wins.
+- Redis is optional. Leave `REDIS_ADDR` empty to disable it; `/health` will report `redis=disabled`.
+
+## Deployment
+
+### Docker (generic)
+
+```powershell
+docker build -t chat-backend .
+docker run --env-file .env -p 8080:8080 chat-backend
+```
+
+### Migrations
+
+Run migrations against your production Postgres before starting the server:
+
+```powershell
+migrate -source "file://migrations" -database "$env:POSTGRES_DSN" up
 ```
 
 ## API Surface
@@ -148,4 +170,3 @@ Endpoint:
 6. Use `message.ack` + `message.new` to update UI.
 7. Send `message.read` when user reads latest message.
 8. On token expiry, call `/auth/refresh` and reconnect WS.
-

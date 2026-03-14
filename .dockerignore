@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+.env.*
+*.log
+server.out.log
+server.err.log
+bin
+.tmp
+node_modules
